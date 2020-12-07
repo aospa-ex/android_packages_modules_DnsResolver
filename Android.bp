@@ -13,6 +13,10 @@ cc_library_headers {
 cc_library_headers {
     name: "dnsproxyd_protocol_headers",
     export_include_dirs: ["include/dnsproxyd_protocol"],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.tethering",
+    ],
 }
 
 aidl_interface {
@@ -101,7 +105,6 @@ cc_library {
         "res_cache.cpp",
         "res_comp.cpp",
         "res_debug.cpp",
-        "res_init.cpp",
         "res_mkquery.cpp",
         "res_query.cpp",
         "res_send.cpp",
