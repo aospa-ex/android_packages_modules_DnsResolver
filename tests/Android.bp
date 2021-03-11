@@ -1,3 +1,12 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "packages_modules_DnsResolver_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["packages_modules_DnsResolver_license"],
+}
+
 cc_test_library {
     name: "libnetd_test_resolv_utils",
     defaults: ["netd_defaults", "resolv_test_defaults"],
@@ -11,7 +20,7 @@ cc_test_library {
         "libutils",
     ],
     static_libs: [
-        "netd_aidl_interface-ndk_platform",
+        "netd_aidl_interface-lateststable-ndk_platform",
         "libnetd_test_dnsresponder_ndk",
         "libnetdutils",
         "libgmock",
@@ -93,7 +102,7 @@ cc_test {
         "libssl",
     ],
     static_libs: [
-        "dnsresolver_aidl_interface-unstable-ndk_platform",
+        "dnsresolver_aidl_interface-lateststable-ndk_platform",
         "golddata_proto",
         "libgmock",
         "libnetd_resolv",
@@ -101,8 +110,8 @@ cc_test {
         "libnetd_test_resolv_utils",
         "libnetdutils",
         "libprotobuf-cpp-lite",
-        "netd_aidl_interface-ndk_platform",
-        "netd_event_listener_interface-unstable-ndk_platform",
+        "netd_aidl_interface-lateststable-ndk_platform",
+        "netd_event_listener_interface-lateststable-ndk_platform",
         "server_configurable_flags",
         "stats_proto",
     ],
@@ -129,14 +138,14 @@ cc_test {
         "libnetd_client",
     ],
     static_libs: [
-        "dnsresolver_aidl_interface-unstable-ndk_platform",
+        "dnsresolver_aidl_interface-lateststable-ndk_platform",
         "libgmock",
         "libnetd_test_dnsresponder_ndk",
         "libnetd_test_resolv_utils",
         "libnetdutils",
         "libutils",
-        "netd_event_listener_interface-unstable-ndk_platform",
-        "netd_aidl_interface-ndk_platform",
+        "netd_event_listener_interface-lateststable-ndk_platform",
+        "netd_aidl_interface-lateststable-ndk_platform",
     ],
 }
 
@@ -164,7 +173,7 @@ cc_test {
         "libnetd_client",
     ],
     static_libs: [
-        "dnsresolver_aidl_interface-unstable-ndk_platform",
+        "dnsresolver_aidl_interface-lateststable-ndk_platform",
         "libcrypto_static",
         "libgmock",
         "libnetd_test_dnsresponder_ndk",
@@ -173,8 +182,8 @@ cc_test {
         "libnetdutils",
         "libssl",
         "libutils",
-        "netd_aidl_interface-ndk_platform",
-        "netd_event_listener_interface-unstable-ndk_platform",
+        "netd_aidl_interface-lateststable-ndk_platform",
+        "netd_event_listener_interface-lateststable-ndk_platform",
         "libipchecksum",
         "resolv_unsolicited_listener",
     ],

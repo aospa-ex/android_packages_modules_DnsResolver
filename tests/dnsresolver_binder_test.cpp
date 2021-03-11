@@ -123,16 +123,15 @@ class DnsResolverBinderTest : public ::testing::Test {
         // Basic regexp to match dump output lines. Matches the beginning and end of the line, and
         // puts the output of the command itself into the first match group.
         // Example: "      11-05 00:23:39.481 myCommand(args) <2.02ms>".
-        // Note: There are 4 leading blank characters in Q, but 6 in R.
+        // Accept any number of the leading space.
         const std::basic_regex lineRegex(
-                "^ {4,6}[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3} "
+                "^\\s*[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3} "
                 "(.*)"
                 " <[0-9]+[.][0-9]{2}ms>$");
 
         // For each element of testdata, check that the expected output appears in the dump output.
         // If not, fail the test and use hintRegex to print similar lines to assist in debugging.
         for (const auto& td : mExpectedLogData) {
-            const std::string toErase = "(null)";
             const bool found =
                     std::any_of(lines.begin(), lines.end(), [&](const std::string& line) {
                         std::smatch match;
@@ -144,11 +143,8 @@ class DnsResolverBinderTest : public ::testing::Test {
                         // have this format in log. So to make register null listener tests are
                         // compatible from all version, just remove the "(null)" argument from
                         // output logs if existed.
-                        std::string output = match[1].str();
-                        const auto pos = output.find(toErase);
-                        if (pos != std::string::npos && pos < output.length()) {
-                            output.erase(pos, toErase.length());
-                        }
+                        const std::string output = android::base::StringReplace(
+                                match[1].str(), "(null)", "", /*all=*/true);
                         return output == td.output;
                     });
             EXPECT_TRUE(found) << "Didn't find line '" << td.output << "' in dumpsys output.";
