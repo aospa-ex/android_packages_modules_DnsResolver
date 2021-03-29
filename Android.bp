@@ -30,6 +30,10 @@ license {
     ],
 }
 
+// Whether to enable the targets in this file that require rust toolchain.
+// Set to false in branches like mainline-prod where rust toolchain isn't supported.
+support_rust_toolchain = true
+
 cc_library_headers {
     name: "libnetd_resolv_headers",
     export_include_dirs: ["include"],
@@ -44,6 +48,8 @@ cc_library_headers {
 
 cc_library_headers {
     name: "dnsproxyd_protocol_headers",
+    sdk_version: "29",
+    min_sdk_version: "29",
     export_include_dirs: ["include/dnsproxyd_protocol"],
     apex_available: [
         "//apex_available:platform",
@@ -51,7 +57,7 @@ cc_library_headers {
     ],
 }
 
-dnsresolver_aidl_interface_lateststable_version = "V7"
+dnsresolver_aidl_interface_lateststable_version = "V8"
 
 cc_library_static {
     name: "dnsresolver_aidl_interface-lateststable-ndk_platform",
@@ -83,8 +89,10 @@ aidl_interface {
             apex_available: [
                 "//apex_available:platform",
                 "com.android.bluetooth.updatable",
+                "com.android.tethering",
                 "com.android.wifi",
             ],
+            min_sdk_version: "30",
         },
         ndk: {
             gen_log: true,
@@ -102,7 +110,11 @@ aidl_interface {
         "5",
         "6",
         "7",
+        "8",
     ],
+    dumpapi: {
+        no_license: true,
+    },
 }
 
 cc_defaults {
@@ -287,54 +299,13 @@ filegroup {
     ],
 }
 
-// TODO: Move this test to tests/
-cc_test {
-    name: "resolv_unit_test",
-    test_suites: [
-        "general-tests",
-        "mts-dnsresolver",
-    ],
-    require_root: true,
-    // TODO: Drop root privileges and make it be an real unit test.
-    // TODO: Remove resolv_test_mts_coverage_defaults after mts coverage switched to 64-bit device.
-    defaults: [
-        "netd_defaults",
-        "resolv_test_defaults",
-        "resolv_test_mts_coverage_defaults",
-    ],
+filegroup {
+    name: "resolv_unit_test_files",
     srcs: [
-        "resolv_cache_unit_test.cpp",
-        "resolv_callback_unit_test.cpp",
-        "resolv_tls_unit_test.cpp",
-        "resolv_unit_test.cpp",
         "DnsQueryLogTest.cpp",
         "DnsStatsTest.cpp",
         "ExperimentsTest.cpp",
         "OperationLimiterTest.cpp",
         "PrivateDnsConfigurationTest.cpp",
-    ],
-    shared_libs: [
-        "libcrypto",
-        "libbinder_ndk",
-        "libssl",
-    ],
-    static_libs: [
-        "dnsresolver_aidl_interface-lateststable-ndk_platform",
-        "netd_aidl_interface-lateststable-ndk_platform",
-        "netd_event_listener_interface-lateststable-ndk_platform",
-        "libcutils",
-        "libgmock",
-        "libnetd_resolv",
-        "libnetd_test_dnsresponder_ndk",
-        "libnetd_test_resolv_utils",
-        "libnetdutils",
-        "libprotobuf-cpp-lite",
-        "libstatslog_resolv",
-        "libstatspush_compat",
-        "libsysutils",
-        "libutils",
-        "resolv_stats_test_utils",
-        "server_configurable_flags",
-        "stats_proto",
     ],
 }
