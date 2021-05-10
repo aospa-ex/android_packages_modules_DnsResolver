@@ -85,14 +85,19 @@ class PrivateDnsConfigurationTest : public ::testing::Test {
     };
 
     void expectPrivateDnsStatus(PrivateDnsMode mode) {
+        // Use PollForCondition because mObserver is notified asynchronously.
+        EXPECT_TRUE(PollForCondition([&]() { return checkPrivateDnsStatus(mode); }));
+    }
+
+    bool checkPrivateDnsStatus(PrivateDnsMode mode) {
         const PrivateDnsStatus status = mPdc.getStatus(kNetId);
-        EXPECT_EQ(status.mode, mode);
+        if (status.mode != mode) return false;
 
         std::map<std::string, Validation> serverStateMap;
         for (const auto& [server, validation] : status.serversMap) {
             serverStateMap[ToString(&server.ss)] = validation;
         }
-        EXPECT_EQ(serverStateMap, mObserver.getServerStateMap());
+        return (serverStateMap == mObserver.getServerStateMap());
     }
 
     static constexpr uint32_t kNetId = 30;
@@ -229,13 +234,12 @@ TEST_F(PrivateDnsConfigurationTest, ServerIdentity_Comparison) {
 
     DnsTlsServer server(netdutils::IPSockAddr::toIPSockAddr("127.0.0.1", 853));
     server.name = "dns.example.com";
-    server.protocol = 1;
 
-    // Different IP address (port is ignored).
+    // Different socket address.
     DnsTlsServer other = server;
     EXPECT_EQ(ServerIdentity(server), ServerIdentity(other));
     other.ss = netdutils::IPSockAddr::toIPSockAddr("127.0.0.1", 5353);
-    EXPECT_EQ(ServerIdentity(server), ServerIdentity(other));
+    EXPECT_NE(ServerIdentity(server), ServerIdentity(other));
     other.ss = netdutils::IPSockAddr::toIPSockAddr("127.0.0.2", 853);
     EXPECT_NE(ServerIdentity(server), ServerIdentity(other));
 
@@ -245,12 +249,6 @@ TEST_F(PrivateDnsConfigurationTest, ServerIdentity_Comparison) {
     other.name = "other.example.com";
     EXPECT_NE(ServerIdentity(server), ServerIdentity(other));
     other.name = "";
-    EXPECT_NE(ServerIdentity(server), ServerIdentity(other));
-
-    // Different protocol.
-    other = server;
-    EXPECT_EQ(ServerIdentity(server), ServerIdentity(other));
-    other.protocol++;
     EXPECT_NE(ServerIdentity(server), ServerIdentity(other));
 }
 
@@ -279,26 +277,30 @@ TEST_F(PrivateDnsConfigurationTest, RequestValidation) {
         const int runningThreads = (config == "IN_PROGRESS") ? 1 : 0;
         ASSERT_TRUE(PollForCondition([&]() { return mObserver.runningThreads == runningThreads; }));
 
-        bool requestAccepted = false;
         if (config == "SUCCESS") {
             EXPECT_CALL(mObserver,
                         onValidationStateUpdate(kServer1, Validation::in_process, kNetId));
             EXPECT_CALL(mObserver, onValidationStateUpdate(kServer1, Validation::success, kNetId));
-            requestAccepted = true;
+            EXPECT_TRUE(mPdc.requestValidation(kNetId, server, kMark).ok());
         } else if (config == "IN_PROGRESS") {
             EXPECT_CALL(mObserver, onValidationStateUpdate(kServer1, Validation::success, kNetId));
+            EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark).ok());
+        } else if (config == "FAIL") {
+            EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark).ok());
         }
 
-        EXPECT_EQ(mPdc.requestValidation(kNetId, server, kMark), requestAccepted);
-
         // Resending the same request or requesting nonexistent servers are denied.
-        EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark));
-        EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark + 1));
-        EXPECT_FALSE(mPdc.requestValidation(kNetId + 1, server, kMark));
+        EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark).ok());
+        EXPECT_FALSE(mPdc.requestValidation(kNetId, server, kMark + 1).ok());
+        EXPECT_FALSE(mPdc.requestValidation(kNetId + 1, server, kMark).ok());
 
         // Reset the test state.
         backend.setDeferredResp(false);
         backend.startServer();
+
+        // Ensure the status of mObserver is synced.
+        expectPrivateDnsStatus(PrivateDnsMode::OPPORTUNISTIC);
+
         ASSERT_TRUE(PollForCondition([&]() { return mObserver.runningThreads == 0; }));
         mPdc.clear(kNetId);
     }

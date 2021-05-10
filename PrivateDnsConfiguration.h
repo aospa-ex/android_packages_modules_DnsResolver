@@ -21,6 +21,7 @@
 #include <mutex>
 #include <vector>
 
+#include <android-base/result.h>
 #include <android-base/thread_annotations.h>
 #include <netdutils/DumpWriter.h>
 #include <netdutils/InternetAddresses.h>
@@ -61,30 +62,27 @@ class PrivateDnsConfiguration {
     int set(int32_t netId, uint32_t mark, const std::vector<std::string>& servers,
             const std::string& name, const std::string& caCert) EXCLUDES(mPrivateDnsLock);
 
-    PrivateDnsStatus getStatus(unsigned netId) EXCLUDES(mPrivateDnsLock);
+    PrivateDnsStatus getStatus(unsigned netId) const EXCLUDES(mPrivateDnsLock);
 
     void clear(unsigned netId) EXCLUDES(mPrivateDnsLock);
 
     // Request |server| to be revalidated on a connection tagged with |mark|.
-    // Return true if the request is accepted; otherwise, return false.
-    bool requestValidation(unsigned netId, const DnsTlsServer& server, uint32_t mark)
+    // Returns a Result to indicate if the request is accepted.
+    base::Result<void> requestValidation(unsigned netId, const DnsTlsServer& server, uint32_t mark)
             EXCLUDES(mPrivateDnsLock);
 
     struct ServerIdentity {
-        const netdutils::IPAddress ip;
-        const std::string name;
-        const int protocol;
+        const netdutils::IPSockAddr sockaddr;
+        const std::string provider;
 
         explicit ServerIdentity(const DnsTlsServer& server)
-            : ip(netdutils::IPSockAddr::toIPSockAddr(server.ss).ip()),
-              name(server.name),
-              protocol(server.protocol) {}
+            : sockaddr(netdutils::IPSockAddr::toIPSockAddr(server.ss)), provider(server.name) {}
 
         bool operator<(const ServerIdentity& other) const {
-            return std::tie(ip, name, protocol) < std::tie(other.ip, other.name, other.protocol);
+            return std::tie(sockaddr, provider) < std::tie(other.sockaddr, other.provider);
         }
         bool operator==(const ServerIdentity& other) const {
-            return std::tie(ip, name, protocol) == std::tie(other.ip, other.name, other.protocol);
+            return std::tie(sockaddr, provider) == std::tie(other.sockaddr, other.provider);
         }
     };
 
@@ -94,14 +92,16 @@ class PrivateDnsConfiguration {
 
   private:
     typedef std::map<ServerIdentity, DnsTlsServer> PrivateDnsTracker;
-    typedef std::set<DnsTlsServer, AddressComparator> ThreadTracker;
 
     PrivateDnsConfiguration() = default;
 
-    void startValidation(const DnsTlsServer& server, unsigned netId) REQUIRES(mPrivateDnsLock);
+    // Launchs a thread to run the validation for |server| on the network |netId|.
+    // |isRevalidation| is true if this call is due to a revalidation request.
+    void startValidation(const DnsTlsServer& server, unsigned netId, bool isRevalidation)
+            REQUIRES(mPrivateDnsLock);
 
-    bool recordPrivateDnsValidation(const DnsTlsServer& server, unsigned netId, bool success)
-            EXCLUDES(mPrivateDnsLock);
+    bool recordPrivateDnsValidation(const DnsTlsServer& server, unsigned netId, bool success,
+                                    bool isRevalidation) EXCLUDES(mPrivateDnsLock);
 
     void sendPrivateDnsValidationEvent(const DnsTlsServer& server, unsigned netId, bool success)
             REQUIRES(mPrivateDnsLock);
@@ -114,7 +114,7 @@ class PrivateDnsConfiguration {
     void updateServerState(const ServerIdentity& identity, Validation state, uint32_t netId)
             REQUIRES(mPrivateDnsLock);
 
-    std::mutex mPrivateDnsLock;
+    mutable std::mutex mPrivateDnsLock;
     std::map<unsigned, PrivateDnsMode> mPrivateDnsModes GUARDED_BY(mPrivateDnsLock);
 
     // Contains all servers for a network, along with their current validation status.
@@ -123,7 +123,7 @@ class PrivateDnsConfiguration {
     // Any pending validation threads will continue running because we have no way to cancel them.
     std::map<unsigned, PrivateDnsTracker> mPrivateDnsTransports GUARDED_BY(mPrivateDnsLock);
 
-    void notifyValidationStateUpdate(const std::string& serverIp, Validation validation,
+    void notifyValidationStateUpdate(const netdutils::IPSockAddr& sockaddr, Validation validation,
                                      uint32_t netId) const REQUIRES(mPrivateDnsLock);
 
     // TODO: fix the reentrancy problem.

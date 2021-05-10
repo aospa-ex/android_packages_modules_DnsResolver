@@ -110,14 +110,14 @@ int PrivateDnsConfiguration::set(int32_t netId, uint32_t mark,
 
         if (needsValidation(server)) {
             updateServerState(identity, Validation::in_process, netId);
-            startValidation(server, netId);
+            startValidation(server, netId, false);
         }
     }
 
     return 0;
 }
 
-PrivateDnsStatus PrivateDnsConfiguration::getStatus(unsigned netId) {
+PrivateDnsStatus PrivateDnsConfiguration::getStatus(unsigned netId) const {
     PrivateDnsStatus status{PrivateDnsMode::OFF, {}};
     std::lock_guard guard(mPrivateDnsLock);
 
@@ -144,41 +144,55 @@ void PrivateDnsConfiguration::clear(unsigned netId) {
     mPrivateDnsTransports.erase(netId);
 }
 
-bool PrivateDnsConfiguration::requestValidation(unsigned netId, const DnsTlsServer& server,
-                                                uint32_t mark) {
+base::Result<void> PrivateDnsConfiguration::requestValidation(unsigned netId,
+                                                              const DnsTlsServer& server,
+                                                              uint32_t mark) {
     std::lock_guard guard(mPrivateDnsLock);
+
+    // Running revalidation requires to mark the server as in_process, which means the server
+    // won't be used until the validation passes. It's necessary and safe to run revalidation
+    // when in private DNS opportunistic mode, because there's a fallback mechanics even if
+    // all of the private DNS servers are in in_process state.
+    if (auto it = mPrivateDnsModes.find(netId); it == mPrivateDnsModes.end()) {
+        return Errorf("NetId not found in mPrivateDnsModes");
+    } else if (it->second != PrivateDnsMode::OPPORTUNISTIC) {
+        return Errorf("Private DNS setting is not opportunistic mode");
+    }
+
     auto netPair = mPrivateDnsTransports.find(netId);
     if (netPair == mPrivateDnsTransports.end()) {
-        return false;
+        return Errorf("NetId not found in mPrivateDnsTransports");
     }
 
     auto& tracker = netPair->second;
     const ServerIdentity identity = ServerIdentity(server);
     auto it = tracker.find(identity);
     if (it == tracker.end()) {
-        return false;
+        return Errorf("Server was removed");
     }
 
     const DnsTlsServer& target = it->second;
 
-    if (!target.active()) return false;
+    if (!target.active()) return Errorf("Server is not active");
 
-    if (target.validationState() != Validation::success) return false;
+    if (target.validationState() != Validation::success) {
+        return Errorf("Server validation state mismatched");
+    }
 
     // Don't run the validation if |mark| (from android_net_context.dns_mark) is different.
     // This is to protect validation from running on unexpected marks.
     // Validation should be associated with a mark gotten by system permission.
-    if (target.mark != mark) return false;
+    if (target.mark != mark) return Errorf("Socket mark mismatched");
 
     updateServerState(identity, Validation::in_process, netId);
-    startValidation(target, netId);
-    return true;
+    startValidation(target, netId, true);
+    return {};
 }
 
-void PrivateDnsConfiguration::startValidation(const DnsTlsServer& server, unsigned netId)
-        REQUIRES(mPrivateDnsLock) {
-    // Note that capturing |server| and |netId| in this lambda create copies.
-    std::thread validate_thread([this, server, netId] {
+void PrivateDnsConfiguration::startValidation(const DnsTlsServer& server, unsigned netId,
+                                              bool isRevalidation) REQUIRES(mPrivateDnsLock) {
+    // Note that capturing |server|, |netId|, and |isRevalidation| in this lambda create copies.
+    std::thread validate_thread([this, server, netId, isRevalidation] {
         setThreadName(StringPrintf("TlsVerify_%u", netId).c_str());
 
         // cat /proc/sys/net/ipv4/tcp_syn_retries yields "6".
@@ -208,7 +222,9 @@ void PrivateDnsConfiguration::startValidation(const DnsTlsServer& server, unsign
             LOG(WARNING) << "validateDnsTlsServer returned " << success << " for "
                          << server.toIpString();
 
-            const bool needs_reeval = this->recordPrivateDnsValidation(server, netId, success);
+            const bool needs_reeval =
+                    this->recordPrivateDnsValidation(server, netId, success, isRevalidation);
+
             if (!needs_reeval) {
                 break;
             }
@@ -254,7 +270,7 @@ void PrivateDnsConfiguration::sendPrivateDnsValidationEvent(const DnsTlsServer& 
 }
 
 bool PrivateDnsConfiguration::recordPrivateDnsValidation(const DnsTlsServer& server, unsigned netId,
-                                                         bool success) {
+                                                         bool success, bool isRevalidation) {
     constexpr bool NEEDS_REEVALUATION = true;
     constexpr bool DONT_REEVALUATE = false;
     const ServerIdentity identity = ServerIdentity(server);
@@ -264,20 +280,25 @@ bool PrivateDnsConfiguration::recordPrivateDnsValidation(const DnsTlsServer& ser
     auto netPair = mPrivateDnsTransports.find(netId);
     if (netPair == mPrivateDnsTransports.end()) {
         LOG(WARNING) << "netId " << netId << " was erased during private DNS validation";
-        notifyValidationStateUpdate(identity.ip.toString(), Validation::fail, netId);
+        notifyValidationStateUpdate(identity.sockaddr, Validation::fail, netId);
         return DONT_REEVALUATE;
     }
 
     const auto mode = mPrivateDnsModes.find(netId);
     if (mode == mPrivateDnsModes.end()) {
         LOG(WARNING) << "netId " << netId << " has no private DNS validation mode";
-        notifyValidationStateUpdate(identity.ip.toString(), Validation::fail, netId);
+        notifyValidationStateUpdate(identity.sockaddr, Validation::fail, netId);
         return DONT_REEVALUATE;
     }
-    const bool modeDoesReevaluation = (mode->second == PrivateDnsMode::STRICT);
 
-    bool reevaluationStatus =
-            (success || !modeDoesReevaluation) ? DONT_REEVALUATE : NEEDS_REEVALUATION;
+    bool reevaluationStatus = NEEDS_REEVALUATION;
+    if (success) {
+        reevaluationStatus = DONT_REEVALUATE;
+    } else if (mode->second == PrivateDnsMode::OFF) {
+        reevaluationStatus = DONT_REEVALUATE;
+    } else if (mode->second == PrivateDnsMode::OPPORTUNISTIC && !isRevalidation) {
+        reevaluationStatus = DONT_REEVALUATE;
+    }
 
     auto& tracker = netPair->second;
     auto serverPair = tracker.find(identity);
@@ -287,8 +308,6 @@ bool PrivateDnsConfiguration::recordPrivateDnsValidation(const DnsTlsServer& ser
         success = false;
         reevaluationStatus = DONT_REEVALUATE;
     } else if (!(serverPair->second == server)) {
-        // TODO: It doesn't seem correct to overwrite the tracker entry for
-        // |server| down below in this circumstance... Fix this.
         LOG(WARNING) << "Server " << server.toIpString()
                      << " was changed during private DNS validation";
         success = false;
@@ -321,18 +340,18 @@ void PrivateDnsConfiguration::updateServerState(const ServerIdentity& identity, 
                                                 uint32_t netId) {
     auto netPair = mPrivateDnsTransports.find(netId);
     if (netPair == mPrivateDnsTransports.end()) {
-        notifyValidationStateUpdate(identity.ip.toString(), Validation::fail, netId);
+        notifyValidationStateUpdate(identity.sockaddr, Validation::fail, netId);
         return;
     }
 
     auto& tracker = netPair->second;
     if (tracker.find(identity) == tracker.end()) {
-        notifyValidationStateUpdate(identity.ip.toString(), Validation::fail, netId);
+        notifyValidationStateUpdate(identity.sockaddr, Validation::fail, netId);
         return;
     }
 
     tracker[identity].setValidationState(state);
-    notifyValidationStateUpdate(identity.ip.toString(), state, netId);
+    notifyValidationStateUpdate(identity.sockaddr, state, netId);
 
     RecordEntry record(netId, identity, state);
     mPrivateDnsLog.push(std::move(record));
@@ -359,11 +378,11 @@ void PrivateDnsConfiguration::setObserver(PrivateDnsValidationObserver* observer
     mObserver = observer;
 }
 
-void PrivateDnsConfiguration::notifyValidationStateUpdate(const std::string& serverIp,
+void PrivateDnsConfiguration::notifyValidationStateUpdate(const netdutils::IPSockAddr& sockaddr,
                                                           Validation validation,
                                                           uint32_t netId) const {
     if (mObserver) {
-        mObserver->onValidationStateUpdate(serverIp, validation, netId);
+        mObserver->onValidationStateUpdate(sockaddr.ip().toString(), validation, netId);
     }
 }
 
@@ -372,10 +391,10 @@ void PrivateDnsConfiguration::dump(netdutils::DumpWriter& dw) const {
     netdutils::ScopedIndent indentStats(dw);
 
     for (const auto& record : mPrivateDnsLog.copy()) {
-        dw.println(fmt::format("{} - netId={} PrivateDns={{{}/{}}} state={}",
-                               timestampToString(record.timestamp), record.netId,
-                               record.serverIdentity.ip.toString(), record.serverIdentity.name,
-                               validationStatusToString(record.state)));
+        dw.println(fmt::format(
+                "{} - netId={} PrivateDns={{{}/{}}} state={}", timestampToString(record.timestamp),
+                record.netId, record.serverIdentity.sockaddr.toString(),
+                record.serverIdentity.provider, validationStatusToString(record.state)));
     }
     dw.blankline();
 }
