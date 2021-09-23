@@ -61,6 +61,8 @@ class Experiments {
             "dot_query_timeout_ms",
             "dot_validation_latency_factor",
             "dot_validation_latency_offset_ms",
+            "doh",
+            "mdns_resolution",
     };
     // This value is used in updateInternal as the default value if any flags can't be found.
     static constexpr int kFlagIntDefault = INT_MIN;
