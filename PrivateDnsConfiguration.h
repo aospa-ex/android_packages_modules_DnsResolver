@@ -60,6 +60,9 @@ struct PrivateDnsStatus {
 
 class PrivateDnsConfiguration {
   public:
+    static constexpr int kDohQueryDefaultTimeoutMs = 30000;
+    static constexpr int kDohProbeDefaultTimeoutMs = 60000;
+
     struct ServerIdentity {
         const netdutils::IPSockAddr sockaddr;
         const std::string provider;
@@ -112,6 +115,9 @@ class PrivateDnsConfiguration {
     void onDohStatusUpdate(uint32_t netId, bool success, const char* ipAddr, const char* host)
             EXCLUDES(mPrivateDnsLock);
 
+    base::Result<netdutils::IPSockAddr> getDohServer(unsigned netId) const
+            EXCLUDES(mPrivateDnsLock);
+
   private:
     typedef std::map<ServerIdentity, std::unique_ptr<IPrivateDnsServer>> PrivateDnsTracker;
 
@@ -144,6 +150,7 @@ class PrivateDnsConfiguration {
                                                          unsigned netId) REQUIRES(mPrivateDnsLock);
 
     void initDohLocked() REQUIRES(mPrivateDnsLock);
+    void clearDohLocked(unsigned netId) REQUIRES(mPrivateDnsLock);
 
     mutable std::mutex mPrivateDnsLock;
     std::map<unsigned, PrivateDnsMode> mPrivateDnsModes GUARDED_BY(mPrivateDnsLock);

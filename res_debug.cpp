@@ -108,13 +108,11 @@
 
 #include <aidl/android/net/IDnsResolver.h>
 #include <android-base/logging.h>
-#include <android-base/stringprintf.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <netdb.h>
-#include <netdutils/Slice.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -131,8 +129,7 @@
 #define RESOLV_ALLOW_VERBOSE_LOGGING 0
 #endif
 
-using android::base::StringAppendF;
-using android::netdutils::Slice;
+using fmt::format_to;
 
 struct res_sym {
     int number;            /* Identifying number, like T_MX */
@@ -145,30 +142,31 @@ static void do_section(ns_msg* handle, ns_sect section) {
     int buflen = 2048;
     ns_rr rr;
     std::string s;
-
+    auto out = std::back_inserter(s);
     /*
      * Print answer records.
      */
     for (;;) {
         if (ns_parserr(handle, section, rrnum, &rr)) {
-            if (errno != ENODEV) StringAppendF(&s, "ns_parserr: %s", strerror(errno));
+            if (errno != ENODEV) format_to(out, "ns_parserr: {}", strerror(errno));
+
             LOG(VERBOSE) << s;
             return;
         }
         if (rrnum == 0) {
             int opcode = ns_msg_getflag(*handle, ns_f_opcode);
-            StringAppendF(&s, ";; %s SECTION:\n", p_section(section, opcode));
+            format_to(out, ";; {} SECTION:\n", p_section(section, opcode));
         }
         if (section == ns_s_qd)
-            StringAppendF(&s, ";;\t%s, type = %s, class = %s\n", ns_rr_name(rr),
-                          p_type(ns_rr_type(rr)), p_class(ns_rr_class(rr)));
+            format_to(out, ";;\t{}, type = {}, class = {}\n", ns_rr_name(rr),
+                      p_type(ns_rr_type(rr)), p_class(ns_rr_class(rr)));
         else if (section == ns_s_ar && ns_rr_type(rr) == ns_t_opt) {
             size_t rdatalen;
             uint16_t optcode, optlen;
 
             rdatalen = ns_rr_rdlen(rr);
-            StringAppendF(&s, "; EDNS: version: %" PRIu32 ", udp=%u, flags=%" PRIu32 "\n",
-                          (rr.ttl >> 16) & 0xff, ns_rr_class(rr), rr.ttl & 0xffff);
+            format_to(out, "; EDNS: version: {}, udp={}, flags={}\n", (rr.ttl >> 16) & 0xff,
+                      ns_rr_class(rr), rr.ttl & 0xffff);
             const uint8_t* cp = ns_rr_rdata(rr);
             while (rdatalen <= ns_rr_rdlen(rr) && rdatalen >= 4) {
                 int i;
@@ -177,33 +175,33 @@ static void do_section(ns_msg* handle, ns_sect section) {
                 GETSHORT(optlen, cp);
 
                 if (optcode == NS_OPT_NSID) {
-                    StringAppendF(&s, "; NSID: ");
+                    format_to(out, "; NSID: ");
                     if (optlen == 0) {
-                        StringAppendF(&s, "; NSID\n");
+                        format_to(out, "; NSID\n");
                     } else {
-                        StringAppendF(&s, "; NSID: ");
+                        format_to(out, "; NSID: ");
                         for (i = 0; i < optlen; i++) {
-                            StringAppendF(&s, "%02x ", cp[i]);
+                            format_to(out, "{:02x} ", cp[i]);
                         }
-                        StringAppendF(&s, " (");
+                        format_to(out, " (");
                         for (i = 0; i < optlen; i++) {
-                            StringAppendF(&s, "%c", isprint(cp[i]) ? cp[i] : '.');
+                            format_to(out, "{} ", isprint(cp[i]) ? cp[i] : '.');
                         }
-                        StringAppendF(&s, ")\n");
+                        format_to(out, ")\n");
                     }
                 } else {
                     if (optlen == 0) {
-                        StringAppendF(&s, "; OPT=%u\n", optcode);
+                        format_to(out, "; OPT={}\n", optcode);
                     } else {
-                        StringAppendF(&s, "; OPT=%u: ", optcode);
+                        format_to(out, "; OPT={}: ", optcode);
                         for (i = 0; i < optlen; i++) {
-                            StringAppendF(&s, "%02x ", cp[i]);
+                            format_to(out, "{:02x} ", cp[i]);
                         }
-                        StringAppendF(&s, " (");
+                        format_to(out, " (");
                         for (i = 0; i < optlen; i++) {
-                            StringAppendF(&s, "%c", isprint(cp[i]) ? cp[i] : '.');
+                            format_to(out, "{}", isprint(cp[i]) ? cp[i] : '.');
                         }
-                        StringAppendF(&s, ")\n");
+                        format_to(out, ")\n");
                     }
                 }
                 rdatalen -= 4 + optlen;
@@ -218,33 +216,46 @@ static void do_section(ns_msg* handle, ns_sect section) {
                         buflen += 1024;
                         continue;
                     } else {
-                        StringAppendF(&s, "buflen over 131072");
+                        format_to(out, "buflen over 131072");
                         PLOG(VERBOSE) << s;
                         return;
                     }
                 }
-                StringAppendF(&s, "ns_sprintrr failed");
+                format_to(out, "ns_sprintrr failed");
                 PLOG(VERBOSE) << s;
                 return;
             }
-            StringAppendF(&s, ";; %s\n", buf.get());
+            format_to(out, ";; {}\n", buf.get());
         }
         rrnum++;
     }
+}
+
+// Convert bytes to its hexadecimal representation.
+// The returned string is double the size of input.
+std::string bytesToHexStr(std::span<const uint8_t> bytes) {
+    static char const hex[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                 '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    std::string str;
+    str.reserve(bytes.size() * 2);
+    for (uint8_t ch : bytes) {
+        str.append({hex[(ch & 0xf0) >> 4], hex[ch & 0xf]});
+    }
+    return str;
 }
 
 /*
  * Print the contents of a query.
  * This is intended to be primarily a debugging routine.
  */
-void res_pquery(const uint8_t* msg, int len) {
+void res_pquery(std::span<const uint8_t> msg) {
     if (!WOULD_LOG(VERBOSE)) return;
 
     ns_msg handle;
     int qdcount, ancount, nscount, arcount;
     uint32_t opcode, rcode, id;
 
-    if (ns_initparse(msg, len, &handle) < 0) {
+    if (ns_initparse(msg.data(), msg.size(), &handle) < 0) {
         PLOG(VERBOSE) << "ns_initparse failed";
         return;
     }
@@ -259,22 +270,22 @@ void res_pquery(const uint8_t* msg, int len) {
     /*
      * Print header fields.
      */
-    std::string s;
-    StringAppendF(&s, ";; ->>HEADER<<- opcode: %s, status: %s, id: %d\n", _res_opcodes[opcode],
-                  p_rcode((int)rcode), id);
-    StringAppendF(&s, ";; flags:");
-    if (ns_msg_getflag(handle, ns_f_qr)) StringAppendF(&s, " qr");
-    if (ns_msg_getflag(handle, ns_f_aa)) StringAppendF(&s, " aa");
-    if (ns_msg_getflag(handle, ns_f_tc)) StringAppendF(&s, " tc");
-    if (ns_msg_getflag(handle, ns_f_rd)) StringAppendF(&s, " rd");
-    if (ns_msg_getflag(handle, ns_f_ra)) StringAppendF(&s, " ra");
-    if (ns_msg_getflag(handle, ns_f_z)) StringAppendF(&s, " ??");
-    if (ns_msg_getflag(handle, ns_f_ad)) StringAppendF(&s, " ad");
-    if (ns_msg_getflag(handle, ns_f_cd)) StringAppendF(&s, " cd");
-    StringAppendF(&s, "; %s: %d", p_section(ns_s_qd, (int)opcode), qdcount);
-    StringAppendF(&s, ", %s: %d", p_section(ns_s_an, (int)opcode), ancount);
-    StringAppendF(&s, ", %s: %d", p_section(ns_s_ns, (int)opcode), nscount);
-    StringAppendF(&s, ", %s: %d", p_section(ns_s_ar, (int)opcode), arcount);
+    std::string s = fmt::format(";; ->>HEADER<<- opcode: {}, status: {}, id: {}\n",
+                                _res_opcodes[opcode], p_rcode((int)rcode), id);
+    auto out = std::back_inserter(s);
+    format_to(out, ";; flags:");
+    if (ns_msg_getflag(handle, ns_f_qr)) format_to(out, " qr");
+    if (ns_msg_getflag(handle, ns_f_aa)) format_to(out, " aa");
+    if (ns_msg_getflag(handle, ns_f_tc)) format_to(out, " tc");
+    if (ns_msg_getflag(handle, ns_f_rd)) format_to(out, " rd");
+    if (ns_msg_getflag(handle, ns_f_ra)) format_to(out, " ra");
+    if (ns_msg_getflag(handle, ns_f_z)) format_to(out, " ??");
+    if (ns_msg_getflag(handle, ns_f_ad)) format_to(out, " ad");
+    if (ns_msg_getflag(handle, ns_f_cd)) format_to(out, " cd");
+    format_to(out, "; {}: {}", p_section(ns_s_qd, (int)opcode), qdcount);
+    format_to(out, ", {}: {}", p_section(ns_s_an, (int)opcode), ancount);
+    format_to(out, ", {}: {}", p_section(ns_s_ns, (int)opcode), nscount);
+    format_to(out, ", {}: {}", p_section(ns_s_ar, (int)opcode), arcount);
 
     LOG(VERBOSE) << s;
 
@@ -287,7 +298,7 @@ void res_pquery(const uint8_t* msg, int len) {
     do_section(&handle, ns_s_ar);
 
     LOG(VERBOSE) << "Hex dump:";
-    LOG(VERBOSE) << android::netdutils::toHex(Slice(const_cast<uint8_t*>(msg), len), 32);
+    LOG(VERBOSE) << bytesToHexStr(msg);
 }
 
 /*
