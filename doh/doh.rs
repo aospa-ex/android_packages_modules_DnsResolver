@@ -35,10 +35,12 @@ use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task;
-use tokio::time::{timeout, Duration, Instant};
 use url::Url;
 
+pub mod boot_time;
 mod ffi;
+
+use boot_time::{timeout, BootTime, Duration};
 
 const MAX_BUFFERED_CMD_SIZE: usize = 400;
 const MAX_INCOMING_BUFFER_SIZE_WHOLE: u64 = 10000000;
@@ -91,7 +93,7 @@ enum Response {
 #[derive(Debug)]
 enum DohCommand {
     Probe { info: ServerInfo, timeout: Duration },
-    Query { net_id: u32, base64_query: Base64Query, expired_time: Instant, resp: QueryResponder },
+    Query { net_id: u32, base64_query: Base64Query, expired_time: BootTime, resp: QueryResponder },
     Clear { net_id: u32 },
     Exit,
 }
@@ -132,41 +134,12 @@ impl<T: Deref> OptionDeref<T> for Option<T> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-struct BootTime {
-    d: Duration,
-}
-
-impl BootTime {
-    fn now() -> BootTime {
-        unsafe {
-            let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-            if libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut t as *mut libc::timespec) != 0 {
-                panic!("get boot time failed: {:?}", std::io::Error::last_os_error());
-            }
-            BootTime { d: Duration::new(t.tv_sec as u64, t.tv_nsec as u32) }
-        }
-    }
-
-    fn elapsed(&self) -> Option<Duration> {
-        BootTime::now().duration_since(*self)
-    }
-
-    fn checked_add(&self, duration: Duration) -> Option<BootTime> {
-        Some(BootTime { d: self.d.checked_add(duration)? })
-    }
-
-    fn duration_since(&self, earlier: BootTime) -> Option<Duration> {
-        self.d.checked_sub(earlier.d)
-    }
-}
-
 /// Context for a running DoH engine.
 pub struct DohDispatcher {
     /// Used to submit cmds to the I/O task.
     cmd_sender: CmdSender,
     join_handle: task::JoinHandle<Result<()>>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
 }
 
 // DoH dispatcher
@@ -176,16 +149,13 @@ impl DohDispatcher {
         tag_socket_fn: TagSocketCallback,
     ) -> Result<DohDispatcher> {
         let (cmd_sender, cmd_receiver) = mpsc::channel::<DohCommand>(MAX_BUFFERED_CMD_SIZE);
-        let runtime = Arc::new(
-            Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("doh-handler")
-                .build()
-                .expect("Failed to create tokio runtime"),
-        );
-        let join_handle =
-            runtime.spawn(doh_handler(cmd_receiver, runtime.clone(), validation_fn, tag_socket_fn));
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("doh-handler")
+            .build()
+            .expect("Failed to create tokio runtime");
+        let join_handle = runtime.spawn(doh_handler(cmd_receiver, validation_fn, tag_socket_fn));
         Ok(DohDispatcher { cmd_sender, join_handle, runtime })
     }
 
@@ -207,7 +177,7 @@ struct DohConnection {
     shared_config: Arc<Mutex<QuicheConfigCache>>,
     scid: SCID,
     state: ConnectionState,
-    pending_queries: Vec<(DnsRequest, QueryResponder, Instant)>,
+    pending_queries: Vec<(DnsRequest, QueryResponder, BootTime)>,
     cached_session: Option<Vec<u8>>,
     tag_socket_fn: TagSocketCallback,
 }
@@ -336,7 +306,7 @@ impl DohConnection {
         };
 
         if let Some(expired_time) = expired_time {
-            if let Some(elapsed) = expired_time.elapsed() {
+            if let Some(elapsed) = BootTime::now().checked_duration_since(*expired_time) {
                 warn!(
                     "Change the state to Idle due to connection timeout, {:?}, {}",
                     elapsed, self.info.net_id
@@ -432,7 +402,7 @@ impl DohConnection {
         &mut self,
         req: DnsRequest,
         resp: QueryResponder,
-        expired_time: Instant,
+        expired_time: BootTime,
     ) -> Result<()> {
         self.handle_if_connection_expired();
         match &mut self.state {
@@ -475,7 +445,7 @@ impl DohConnection {
                 while !self.pending_queries.is_empty() {
                     if let Some((req, resp, exp_time)) = self.pending_queries.pop() {
                         // Ignore the expired queries.
-                        if Instant::now().checked_duration_since(exp_time).is_some() {
+                        if BootTime::now().checked_duration_since(exp_time).is_some() {
                             warn!("Drop the obsolete query for network {}", self.info.net_id);
                             continue;
                         }
@@ -599,9 +569,9 @@ async fn send_dns_query(
     udp_sk: &mut UdpSocket,
     h3_conn: &mut h3::Connection,
     query_map: &mut HashMap<u64, (Vec<u8>, QueryResponder)>,
-    pending_queries: &mut Vec<(DnsRequest, QueryResponder, Instant)>,
+    pending_queries: &mut Vec<(DnsRequest, QueryResponder, BootTime)>,
     resp: QueryResponder,
-    expired_time: Instant,
+    expired_time: BootTime,
     req: DnsRequest,
 ) -> Result<()> {
     if !quic_conn.is_established() {
@@ -689,10 +659,9 @@ async fn flush_tx(
     Ok(())
 }
 
-fn report_private_dns_validation(
+async fn report_private_dns_validation(
     info: &ServerInfo,
     state: &ConnectionState,
-    runtime: Arc<Runtime>,
     validation_fn: ValidationCallback,
 ) {
     let (ip_addr, domain) = match (
@@ -707,14 +676,16 @@ fn report_private_dns_validation(
     };
     let netd_id = info.net_id;
     let success = matches!(state, ConnectionState::Connected { .. });
-    runtime
-        .spawn_blocking(move || validation_fn(netd_id, success, ip_addr.as_ptr(), domain.as_ptr()));
+    task::spawn_blocking(move || {
+        validation_fn(netd_id, success, ip_addr.as_ptr(), domain.as_ptr())
+    })
+    .await
+    .unwrap_or_else(|e| warn!("Validation function task failed: {}", e));
 }
 
-fn handle_probe_result(
+async fn handle_probe_result(
     result: (ServerInfo, Result<DohConnection, (anyhow::Error, DohConnection)>),
     doh_conn_map: &mut HashMap<u32, (ServerInfo, Option<DohConnection>)>,
-    runtime: Arc<Runtime>,
     validation_fn: ValidationCallback,
 ) {
     let (info, doh_conn) = match result {
@@ -745,7 +716,7 @@ fn handle_probe_result(
             return;
         }
     }
-    report_private_dns_validation(&info, &doh_conn.state, runtime, validation_fn);
+    report_private_dns_validation(&info, &doh_conn.state, validation_fn).await;
     doh_conn_map.insert(info.net_id, (info, Some(doh_conn)));
 }
 
@@ -805,7 +776,7 @@ impl QuicheConfigCache {
 async fn handle_query_cmd(
     net_id: u32,
     base64_query: Base64Query,
-    expired_time: Instant,
+    expired_time: BootTime,
     resp: QueryResponder,
     doh_conn_map: &mut HashMap<u32, (ServerInfo, Option<DohConnection>)>,
 ) {
@@ -849,7 +820,6 @@ fn need_process_queries(doh_conn_map: &HashMap<u32, (ServerInfo, Option<DohConne
 
 async fn doh_handler(
     mut cmd_rx: CmdReceiver,
-    runtime: Arc<Runtime>,
     validation_fn: ValidationCallback,
     tag_socket_fn: TagSocketCallback,
 ) -> Result<()> {
@@ -871,8 +841,7 @@ async fn doh_handler(
                 join_all(futures).await
             }, if need_process_queries(&doh_conn_map) => {},
             Some(result) = probe_futures.next() => {
-                let runtime_clone = runtime.clone();
-                handle_probe_result(result, &mut doh_conn_map, runtime_clone, validation_fn);
+                handle_probe_result(result, &mut doh_conn_map, validation_fn).await;
                 info!("probe_futures remaining size: {}", probe_futures.len());
             },
             Some(cmd) = cmd_rx.recv() => {
@@ -892,7 +861,7 @@ async fn doh_handler(
                             }
                             Err(e) => {
                                 error!("create connection for network {} error {:?}", info.net_id, e);
-                                report_private_dns_validation(&info, &ConnectionState::Error, runtime.clone(), validation_fn);
+                                report_private_dns_validation(&info, &ConnectionState::Error, validation_fn).await;
                             }
                         }
                     },
@@ -1031,7 +1000,7 @@ mod tests {
         ServerInfo,
         HashMap<u32, (ServerInfo, Option<DohConnection>)>,
         Arc<Mutex<QuicheConfigCache>>,
-        Arc<Runtime>,
+        Runtime,
     ) {
         let test_map: HashMap<u32, (ServerInfo, Option<DohConnection>)> = HashMap::new();
         let info = ServerInfo {
@@ -1045,13 +1014,11 @@ mod tests {
         let config_cache =
             Arc::new(Mutex::new(QuicheConfigCache { cert_path: None, config: None }));
 
-        let rt = Arc::new(
-            Builder::new_current_thread()
-                .thread_name("test-runtime")
-                .enable_all()
-                .build()
-                .expect("Failed to create testing tokio runtime"),
-        );
+        let rt = Builder::new_current_thread()
+            .thread_name("test-runtime")
+            .enable_all()
+            .build()
+            .expect("Failed to create testing tokio runtime");
         (info, test_map, config_cache, rt)
     }
 
@@ -1113,7 +1080,7 @@ mod tests {
             super::handle_query_cmd(
                 info.net_id,
                 query.clone(),
-                Instant::now().checked_add(t).unwrap(),
+                BootTime::now().checked_add(t).unwrap(),
                 resp_tx,
                 &mut test_map,
             )
@@ -1128,7 +1095,7 @@ mod tests {
             super::handle_query_cmd(
                 info.net_id,
                 query.clone(),
-                Instant::now().checked_add(t).unwrap(),
+                BootTime::now().checked_add(t).unwrap(),
                 resp_tx,
                 &mut test_map,
             )
@@ -1154,7 +1121,7 @@ mod tests {
             super::handle_query_cmd(
                 info.net_id,
                 query.clone(),
-                Instant::now().checked_add(t).unwrap(),
+                BootTime::now().checked_add(t).unwrap(),
                 resp_tx,
                 &mut test_map,
             )
@@ -1247,13 +1214,11 @@ mod tests {
             sk_mark: 0,
             cert_path: None,
         };
-        let rt = Arc::new(
-            Builder::new_current_thread()
-                .thread_name("test-runtime")
-                .enable_io()
-                .build()
-                .expect("Failed to create testing tokio runtime"),
-        );
+        let rt = Builder::new_current_thread()
+            .thread_name("test-runtime")
+            .enable_io()
+            .build()
+            .expect("Failed to create testing tokio runtime");
         let default_panic = std::panic::take_hook();
         // Exit the test if the worker inside tokio runtime panicked.
         std::panic::set_hook(Box::new(move |info| {
@@ -1261,30 +1226,12 @@ mod tests {
             std::process::exit(1);
         }));
         rt.block_on(async {
-            super::report_private_dns_validation(
-                &info,
-                &make_dummy_connected_state(),
-                rt.clone(),
-                success_cb,
-            );
-            super::report_private_dns_validation(
-                &info,
-                &ConnectionState::Error,
-                rt.clone(),
-                fail_cb,
-            );
-            super::report_private_dns_validation(
-                &info,
-                &make_dummy_connecting_state(),
-                rt.clone(),
-                fail_cb,
-            );
-            super::report_private_dns_validation(
-                &info,
-                &ConnectionState::Idle,
-                rt.clone(),
-                fail_cb,
-            );
+            super::report_private_dns_validation(&info, &make_dummy_connected_state(), success_cb)
+                .await;
+            super::report_private_dns_validation(&info, &ConnectionState::Error, fail_cb).await;
+            super::report_private_dns_validation(&info, &make_dummy_connecting_state(), fail_cb)
+                .await;
+            super::report_private_dns_validation(&info, &ConnectionState::Idle, fail_cb).await;
         });
     }
 
