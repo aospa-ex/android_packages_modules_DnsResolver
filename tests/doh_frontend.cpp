@@ -67,11 +67,52 @@ int DohFrontend::queries() const {
     return stats.queries_received;
 }
 
+int DohFrontend::connections() const {
+    std::lock_guard guard(mMutex);
+    if (!mRustDoh) return 0;
+
+    rust::Stats stats;
+    rust::frontend_stats(mRustDoh, &stats);
+    return stats.connections;
+}
+
 void DohFrontend::clearQueries() {
     std::lock_guard guard(mMutex);
     if (mRustDoh) {
         frontend_stats_clear_queries(mRustDoh);
     }
+}
+
+bool DohFrontend::setMaxIdleTimeout(uint64_t value) {
+    std::lock_guard guard(mMutex);
+    if (!mRustDoh) return false;
+
+    frontend_set_max_idle_timeout(mRustDoh, value);
+    return true;
+}
+
+bool DohFrontend::setMaxBufferSize(uint64_t value) {
+    std::lock_guard guard(mMutex);
+    if (!mRustDoh) return false;
+
+    frontend_set_max_buffer_size(mRustDoh, value);
+    return true;
+}
+
+bool DohFrontend::setMaxStreamsBidi(uint64_t value) {
+    std::lock_guard guard(mMutex);
+    if (!mRustDoh) return false;
+
+    frontend_set_max_streams_bidi(mRustDoh, value);
+    return true;
+}
+
+bool DohFrontend::block_sending(bool block) {
+    std::lock_guard guard(mMutex);
+    if (!mRustDoh) return false;
+
+    frontend_block_sending(mRustDoh, block);
+    return true;
 }
 
 }  // namespace test

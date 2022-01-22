@@ -17,7 +17,7 @@
 //! Client management, including the communication with quiche I/O.
 
 use anyhow::{anyhow, bail, ensure, Result};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use quiche::h3::NameValue;
 use ring::hmac;
 use ring::rand::SystemRandom;
@@ -170,16 +170,16 @@ impl Client {
     pub fn flush_egress(&mut self) -> Result<Vec<u8>> {
         let mut ret = vec![];
         let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
-        loop {
-            let (write, _) = match self.conn.send(&mut buf) {
-                Ok(v) => v,
-                Err(quiche::Error::Done) => break,
 
-                // Maybe close the connection?
-                Err(e) => bail!(e),
-            };
-            ret.append(&mut buf[..write].to_vec());
-        }
+        let (write, _) = match self.conn.send(&mut buf) {
+            Ok(v) => v,
+            Err(quiche::Error::Done) => bail!(quiche::Error::Done),
+            Err(e) => {
+                error!("flush_egress failed: {}", e);
+                bail!(e)
+            }
+        };
+        ret.append(&mut buf[..write].to_vec());
 
         Ok(ret)
     }
@@ -253,13 +253,14 @@ impl ClientMap {
         &mut self,
         hdr: &quiche::Header,
         addr: &SocketAddr,
-    ) -> Result<&mut Client> {
-        let dcid = hdr.dcid.as_ref().to_vec();
-        let client = if !self.clients.contains_key(&dcid) {
+    ) -> Result<(&mut Client, bool)> {
+        let dcid = hdr.dcid.as_ref();
+        let is_new_client = !self.clients.contains_key(dcid);
+        let client = if is_new_client {
             ensure!(hdr.ty == quiche::Type::Initial, "Packet is not Initial");
             ensure!(quiche::version_is_supported(hdr.version), "Protocol version not supported");
 
-            let scid = generate_conn_id(&self.conn_id_seed, &dcid);
+            let scid = generate_conn_id(&self.conn_id_seed, dcid);
             let conn = quiche::accept(
                 &quiche::ConnectionId::from_ref(&scid),
                 None, /* odcid */
@@ -272,10 +273,10 @@ impl ClientMap {
             self.clients.insert(scid.clone(), client);
             self.clients.get_mut(&scid).unwrap()
         } else {
-            self.clients.get_mut(&dcid).unwrap()
+            self.clients.get_mut(dcid).unwrap()
         };
 
-        Ok(client)
+        Ok((client, is_new_client))
     }
 
     pub fn get_mut(&mut self, id: &[u8]) -> Option<&mut Client> {
