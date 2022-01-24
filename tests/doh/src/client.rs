@@ -222,6 +222,10 @@ impl Client {
     pub fn on_timeout(&mut self) {
         self.conn.on_timeout();
     }
+
+    pub fn is_alive(&self) -> bool {
+        self.conn.is_established() && !self.conn.is_closed()
+    }
 }
 
 impl std::fmt::Debug for Client {
@@ -253,14 +257,13 @@ impl ClientMap {
         &mut self,
         hdr: &quiche::Header,
         addr: &SocketAddr,
-    ) -> Result<(&mut Client, bool)> {
-        let dcid = hdr.dcid.as_ref();
-        let is_new_client = !self.clients.contains_key(dcid);
-        let client = if is_new_client {
+    ) -> Result<&mut Client> {
+        let dcid = hdr.dcid.as_ref().to_vec();
+        let client = if !self.clients.contains_key(&dcid) {
             ensure!(hdr.ty == quiche::Type::Initial, "Packet is not Initial");
             ensure!(quiche::version_is_supported(hdr.version), "Protocol version not supported");
 
-            let scid = generate_conn_id(&self.conn_id_seed, dcid);
+            let scid = generate_conn_id(&self.conn_id_seed, &dcid);
             let conn = quiche::accept(
                 &quiche::ConnectionId::from_ref(&scid),
                 None, /* odcid */
@@ -273,18 +276,26 @@ impl ClientMap {
             self.clients.insert(scid.clone(), client);
             self.clients.get_mut(&scid).unwrap()
         } else {
-            self.clients.get_mut(dcid).unwrap()
+            self.clients.get_mut(&dcid).unwrap()
         };
 
-        Ok((client, is_new_client))
+        Ok(client)
     }
 
     pub fn get_mut(&mut self, id: &[u8]) -> Option<&mut Client> {
         self.clients.get_mut(&id.to_vec())
     }
 
-    pub fn get_mut_iter(&mut self) -> hash_map::IterMut<ConnectionID, Client> {
+    pub fn iter_mut(&mut self) -> hash_map::IterMut<ConnectionID, Client> {
         self.clients.iter_mut()
+    }
+
+    pub fn iter(&mut self) -> hash_map::Iter<ConnectionID, Client> {
+        self.clients.iter()
+    }
+
+    pub fn len(&mut self) -> usize {
+        self.clients.len()
     }
 }
 
