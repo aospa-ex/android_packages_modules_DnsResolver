@@ -44,17 +44,28 @@ struct PrivateDnsStatus {
     PrivateDnsMode mode;
 
     // TODO: change the type to std::vector<DnsTlsServer>.
-    std::map<DnsTlsServer, Validation, AddressComparator> serversMap;
+    std::map<DnsTlsServer, Validation, AddressComparator> dotServersMap;
+
+    std::map<netdutils::IPSockAddr, Validation> dohServersMap;
 
     std::list<DnsTlsServer> validatedServers() const {
         std::list<DnsTlsServer> servers;
 
-        for (const auto& pair : serversMap) {
+        for (const auto& pair : dotServersMap) {
             if (pair.second == Validation::success) {
                 servers.push_back(pair.first);
             }
         }
         return servers;
+    }
+
+    bool hasValidatedDohServers() const {
+        for (const auto& [_, status] : dohServersMap) {
+            if (status == Validation::success) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -62,6 +73,9 @@ class PrivateDnsConfiguration {
   public:
     static constexpr int kDohQueryDefaultTimeoutMs = 30000;
     static constexpr int kDohProbeDefaultTimeoutMs = 60000;
+
+    // The default value for QUIC max_idle_timeout.
+    static constexpr int kDohIdleDefaultTimeoutMs = 55000;
 
     struct ServerIdentity {
         const netdutils::IPSockAddr sockaddr;
@@ -207,7 +221,7 @@ class PrivateDnsConfiguration {
         std::set<std::string> ips;
         std::string host;
         std::string httpsTemplate;
-        bool forTesting;
+        bool requireRootPermission;
         base::Result<DohIdentity> getDohIdentity(const std::vector<std::string>& ips,
                                                  const std::string& host) const {
             if (!host.empty() && this->host != host) return Errorf("host {} not matched", host);
@@ -223,7 +237,7 @@ class PrivateDnsConfiguration {
 
     // TODO: Move below DoH relevant stuff into Rust implementation.
     std::map<unsigned, DohIdentity> mDohTracker GUARDED_BY(mPrivateDnsLock);
-    std::array<DohProviderEntry, 3> mAvailableDoHProviders = {{
+    std::array<DohProviderEntry, 4> mAvailableDoHProviders = {{
             {"Google",
              {"2001:4860:4860::8888", "2001:4860:4860::8844", "8.8.8.8", "8.8.4.4"},
              "dns.google",
@@ -235,12 +249,19 @@ class PrivateDnsConfiguration {
              "https://cloudflare-dns.com/dns-query",
              false},
 
-            // The DoH provider for testing.
+            // The DoH providers for testing only.
+            // Using ResolverTestProvider requires that the DnsResolver is configured by someone
+            // who has root permission, which should be run by tests only.
             {"ResolverTestProvider",
              {"127.0.0.3", "::1"},
              "example.com",
              "https://example.com/dns-query",
              true},
+            {"AndroidTesting",
+             {"192.0.2.100"},
+             "dns.androidtesting.org",
+             "https://dns.androidtesting.org/dns-query",
+             false},
     }};
 
     struct RecordEntry {
