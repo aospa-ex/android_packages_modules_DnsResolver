@@ -34,6 +34,7 @@
 #include "tests/dns_responder/dns_responder.h"
 #include "tests/dns_responder/dns_responder_client_ndk.h"
 #include "tests/dns_responder/dns_tls_frontend.h"
+#include "tests/resolv_test_base.h"
 #include "tests/resolv_test_utils.h"
 #include "tests/unsolicited_listener/unsolicited_event_listener.h"
 
@@ -146,7 +147,7 @@ void expectAnswersValid(int fd, int ipType, const std::string& expectedAnswer) {
 
 // Base class to deal with netd binder service and resolver binder service.
 // TODO: derive ResolverTest from this base class.
-class BaseTest : public ::testing::Test {
+class BaseTest : public ResolvTestBase {
   public:
     static void SetUpTestSuite() {
         // Get binder service.
@@ -790,9 +791,6 @@ TEST_F(PrivateDnsDohTest, ExcessDnsRequests) {
     const int initial_max_idle_timeout_ms = 2000;
     ASSERT_TRUE(doh.stopServer());
     EXPECT_TRUE(doh.setMaxIdleTimeout(initial_max_idle_timeout_ms));
-    // Sleep a while to avoid binding socket failed.
-    // TODO: Make DohFrontend retry binding sockets.
-    sleep_for(milliseconds(100));
     ASSERT_TRUE(doh.startServer());
 
     auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
@@ -885,9 +883,6 @@ TEST_F(PrivateDnsDohTest, RunOutOfDataLimit) {
 
     ASSERT_TRUE(doh.stopServer());
     EXPECT_TRUE(doh.setMaxBufferSize(initial_max_data));
-    // Sleep a while to avoid binding socket failed.
-    // TODO: Make DohFrontend retry binding sockets.
-    sleep_for(milliseconds(100));
     ASSERT_TRUE(doh.startServer());
 
     const auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
@@ -937,8 +932,6 @@ TEST_F(PrivateDnsDohTest, RunOutOfStreams) {
 
     ASSERT_TRUE(doh.stopServer());
     EXPECT_TRUE(doh.setMaxStreamsBidi(initial_max_streams_bidi));
-    // Sleep a while to avoid binding socket failed.
-    sleep_for(milliseconds(100));
     ASSERT_TRUE(doh.startServer());
 
     const auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
@@ -977,8 +970,6 @@ TEST_F(PrivateDnsDohTest, ReconnectAfterIdleTimeout) {
 
     ASSERT_TRUE(doh.stopServer());
     EXPECT_TRUE(doh.setMaxIdleTimeout(initial_max_idle_timeout_ms));
-    // Sleep a while to avoid binding socket failed.
-    sleep_for(milliseconds(100));
     ASSERT_TRUE(doh.startServer());
 
     const auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
@@ -1061,8 +1052,6 @@ TEST_F(PrivateDnsDohTest, SessionResumption) {
 
         ASSERT_TRUE(doh.stopServer());
         EXPECT_TRUE(doh.setMaxIdleTimeout(initial_max_idle_timeout_ms));
-        // Sleep a while to avoid binding socket failed.
-        sleep_for(milliseconds(100));
         ASSERT_TRUE(doh.startServer());
 
         const auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
@@ -1111,8 +1100,6 @@ TEST_F(PrivateDnsDohTest, RemoteConnectionClosed) {
     // Make the server close the connection. This will also reset the stats, so the doh query
     // count below is still 2 rather than 4.
     ASSERT_TRUE(doh.stopServer());
-    // Sleep a while to avoid binding socket failed.
-    sleep_for(milliseconds(100));
     ASSERT_TRUE(doh.startServer());
 
     EXPECT_NO_FAILURE(sendQueryAndCheckResult());
