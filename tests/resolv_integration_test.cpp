@@ -92,6 +92,7 @@ const std::string kDotValidationLatencyFactorFlag(
         "persist.device_config.netd_native.dot_validation_latency_factor");
 const std::string kDotValidationLatencyOffsetMsFlag(
         "persist.device_config.netd_native.dot_validation_latency_offset_ms");
+const std::string kDotQuickFallbackFlag("persist.device_config.netd_native.dot_quick_fallback");
 // Semi-public Bionic hook used by the NDK (frameworks/base/native/android/net.c)
 // Tested here for convenience.
 extern "C" int android_getaddrinfofornet(const char* hostname, const char* servname,
@@ -2189,9 +2190,10 @@ int getAsyncResponse(int fd, int* rcode, uint8_t* buf, int bufLen) {
     wait_fd[0].fd = fd;
     wait_fd[0].events = POLLIN;
     short revents;
-    int ret;
 
-    ret = poll(wait_fd, 1, -1);
+    if (int ret = poll(wait_fd, 1, -1); ret <= 0) {
+        return -1;
+    }
     revents = wait_fd[0].revents;
     if (revents & POLLIN) {
         return resNetworkResult(fd, rcode, buf, bufLen);
@@ -2201,12 +2203,10 @@ int getAsyncResponse(int fd, int* rcode, uint8_t* buf, int bufLen) {
 
 std::string toString(uint8_t* buf, int bufLen, int ipType) {
     ns_msg handle;
-    int ancount, n = 0;
     ns_rr rr;
 
     if (ns_initparse((const uint8_t*)buf, bufLen, &handle) >= 0) {
-        ancount = ns_msg_count(handle, ns_s_an);
-        if (ns_parserr(&handle, ns_s_an, n, &rr) == 0) {
+        if (ns_parserr(&handle, ns_s_an, 0, &rr) == 0) {
             const uint8_t* rdata = ns_rr_rdata(rr);
             char buffer[INET6_ADDRSTRLEN];
             if (inet_ntop(ipType, (const char*)rdata, buffer, sizeof(buffer))) {
@@ -4240,8 +4240,9 @@ TEST_F(ResolverTest, getDnsNetId) {
     EXPECT_EQ(500, readResponseCode(fd));
 }
 
-// TODO(b/219434602): find an alternative way to block DNS packets or delete the test.
-TEST_F(ResolverTest, DISABLED_BlockDnsQueryWithUidRule) {
+// TODO(b/219434602): find an alternative way to block DNS packets on T+.
+TEST_F(ResolverTest, BlockDnsQueryWithUidRule) {
+    if (android::modules::sdklevel::IsAtLeastT()) GTEST_SKIP() << "T+ device.";
     SKIP_IF_BPF_NOT_SUPPORTED;
     constexpr char listen_addr1[] = "127.0.0.4";
     constexpr char listen_addr2[] = "::1";
@@ -4289,8 +4290,9 @@ TEST_F(ResolverTest, DISABLED_BlockDnsQueryWithUidRule) {
     }
 }
 
-// TODO(b/219434602): find an alternative way to block DNS packets or delete the test.
-TEST_F(ResolverTest, DISABLED_GetAddrinfo_BlockDnsQueryWithUidRule) {
+// TODO(b/219434602): find an alternative way to block DNS packets on T+.
+TEST_F(ResolverTest, GetAddrinfo_BlockDnsQueryWithUidRule) {
+    if (android::modules::sdklevel::IsAtLeastT()) GTEST_SKIP() << "T+ device.";
     SKIP_IF_BPF_NOT_SUPPORTED;
     constexpr char listen_addr1[] = "127.0.0.4";
     constexpr char listen_addr2[] = "::1";
@@ -4340,8 +4342,9 @@ TEST_F(ResolverTest, DISABLED_GetAddrinfo_BlockDnsQueryWithUidRule) {
     }
 }
 
-// TODO(b/219434602): find an alternative way to block DNS packets or delete the test.
-TEST_F(ResolverTest, DISABLED_EnforceDnsUid) {
+// TODO(b/219434602): find an alternative way to block DNS packets on T+.
+TEST_F(ResolverTest, EnforceDnsUid) {
+    if (android::modules::sdklevel::IsAtLeastT()) GTEST_SKIP() << "T+ device.";
     SKIP_IF_BPF_NOT_SUPPORTED;
     constexpr char listen_addr1[] = "127.0.0.4";
     constexpr char listen_addr2[] = "::1";
@@ -4916,6 +4919,77 @@ TEST_F(ResolverTest, TlsServerValidation_UdpProbe) {
     }
 }
 
+// Verifies that DNS queries can quick fall back to UDP if the first DoT server is unresponsive.
+TEST_F(ResolverTest, DotQuickFallback) {
+    constexpr int DOT_CONNECT_TIMEOUT_MS = 1000;
+    const std::string addr1 = getUniqueIPv4Address();
+    const std::string addr2 = getUniqueIPv4Address();
+    test::DNSResponder dns1(addr1);
+    test::DNSResponder dns2(addr2);
+    test::DnsTlsFrontend dot1(addr1, "853", addr1, "53");
+    test::DnsTlsFrontend dot2(addr2, "853", addr2, "53");
+
+    dns1.addMapping(kHelloExampleCom, ns_type::ns_t_aaaa, kHelloExampleComAddrV6);
+    dns2.addMapping(kHelloExampleCom, ns_type::ns_t_aaaa, kHelloExampleComAddrV6);
+    ASSERT_TRUE(dns1.startServer());
+    ASSERT_TRUE(dns2.startServer());
+    ASSERT_TRUE(dot1.startServer());
+    ASSERT_TRUE(dot2.startServer());
+
+    static const struct TestConfig {
+        std::string privateDnsMode;
+        int dotQuickFallbackFlag;
+    } testConfigs[] = {
+            // clang-format off
+            {"OPPORTUNISTIC", 0},
+            {"OPPORTUNISTIC", 1},
+            {"STRICT",        0},
+            {"STRICT",        1},
+            // clang-format on
+    };
+
+    for (const auto& config : testConfigs) {
+        SCOPED_TRACE(fmt::format("testConfig: [{}, {}]", config.privateDnsMode,
+                                 config.dotQuickFallbackFlag));
+
+        const bool canQuickFallback =
+                (config.dotQuickFallbackFlag == 1) && (config.privateDnsMode == "OPPORTUNISTIC");
+        ScopedSystemProperties sp1(kDotConnectTimeoutMsFlag,
+                                   std::to_string(DOT_CONNECT_TIMEOUT_MS));
+        ScopedSystemProperties sp2(kDotQuickFallbackFlag,
+                                   std::to_string(config.dotQuickFallbackFlag));
+        resetNetwork();
+
+        auto parcel = DnsResponderClient::GetDefaultResolverParamsParcel();
+        parcel.servers = {addr1, addr2};
+        parcel.tlsServers = {addr1, addr2};
+        parcel.tlsName = (config.privateDnsMode == "STRICT") ? kDefaultPrivateDnsHostName : "";
+        ASSERT_TRUE(mDnsClient.SetResolversFromParcel(parcel));
+
+        EXPECT_TRUE(WaitForPrivateDnsValidation(dot1.listen_address(), true));
+        EXPECT_TRUE(WaitForPrivateDnsValidation(dot2.listen_address(), true));
+        EXPECT_TRUE(dot1.waitForQueries(1));
+        EXPECT_TRUE(dot2.waitForQueries(1));
+        dot1.clearQueries();
+        dot2.clearQueries();
+        dot1.clearConnectionsCount();
+        dot2.clearConnectionsCount();
+
+        // Set the DoT server unresponsive to connection handshake.
+        dot1.setHangOnHandshakeForTesting(true);
+
+        int fd = resNetworkQuery(TEST_NETID, kHelloExampleCom, ns_c_in, ns_t_aaaa,
+                                 ANDROID_RESOLV_NO_CACHE_LOOKUP);
+        expectAnswersValid(fd, AF_INET6, kHelloExampleComAddrV6);
+
+        EXPECT_EQ(dot1.acceptConnectionsCount(), 1);
+        EXPECT_EQ(dot2.acceptConnectionsCount(), canQuickFallback ? 0 : 1);
+        EXPECT_EQ(dot2.queries(), canQuickFallback ? 0 : 1);
+
+        dot1.setHangOnHandshakeForTesting(false);
+    }
+}
+
 TEST_F(ResolverTest, FlushNetworkCache) {
     SKIP_IF_REMOTE_VERSION_LESS_THAN(mDnsClient.resolvService(), 4);
     test::DNSResponder dns;
@@ -4924,15 +4998,26 @@ TEST_F(ResolverTest, FlushNetworkCache) {
 
     const hostent* result = gethostbyname("hello");
     EXPECT_EQ(1U, GetNumQueriesForType(dns, ns_type::ns_t_a, kHelloExampleCom));
+    std::function<bool()> HasTheExpectedResult = [result]() -> bool {
+        if (result == nullptr) return false;
+        EXPECT_EQ(4, result->h_length);
+        if (result->h_addr_list[0] == nullptr) return false;
+        EXPECT_EQ(kHelloExampleComAddrV4, ToString(result));
+        EXPECT_TRUE(result->h_addr_list[1] == nullptr);
+        return true;
+    };
+    ASSERT_TRUE(HasTheExpectedResult());
 
     // get result from cache
     result = gethostbyname("hello");
     EXPECT_EQ(1U, GetNumQueriesForType(dns, ns_type::ns_t_a, kHelloExampleCom));
+    ASSERT_TRUE(HasTheExpectedResult());
 
     EXPECT_TRUE(mDnsClient.resolvService()->flushNetworkCache(TEST_NETID).isOk());
 
     result = gethostbyname("hello");
     EXPECT_EQ(2U, GetNumQueriesForType(dns, ns_type::ns_t_a, kHelloExampleCom));
+    ASSERT_TRUE(HasTheExpectedResult());
 }
 
 TEST_F(ResolverTest, FlushNetworkCache_random) {
@@ -5836,8 +5921,9 @@ TEST_F(ResolverTest, GetAddrInfoParallelLookupSleepTime) {
     EXPECT_EQ(0U, GetNumQueries(dns, kHelloExampleCom));
 }
 
-// TODO(b/219434602): find an alternative way to block DNS packets or delete the test.
-TEST_F(ResolverTest, DISABLED_BlockDnsQueryUidDoesNotLeadToBadServer) {
+// TODO(b/219434602): find an alternative way to block DNS packets on T+.
+TEST_F(ResolverTest, BlockDnsQueryUidDoesNotLeadToBadServer) {
+    if (android::modules::sdklevel::IsAtLeastT()) GTEST_SKIP() << "T+ device.";
     SKIP_IF_BPF_NOT_SUPPORTED;
     constexpr char listen_addr1[] = "127.0.0.4";
     constexpr char listen_addr2[] = "::1";
@@ -6569,7 +6655,6 @@ TEST_F(ResolverTest, MdnsGetAddrInfo_fallback) {
             EXPECT_EQ(1U, GetNumQueries(mdnsv6, host_name));
             EXPECT_EQ(2U, GetNumQueries(dns, host_name));
         }
-        std::string result_str = ToString(result);
         EXPECT_THAT(ToStrings(result), testing::UnorderedElementsAreArray(config.expected_addr));
 
         mdnsv4.clearQueries();
@@ -7087,8 +7172,9 @@ TEST_F(ResolverMultinetworkTest, OneCachePerNetwork) {
     EXPECT_EQ(GetNumQueries(*dnsPair2->dnsServer, host_name), 1U);
 }
 
-// TODO(b/219434602): find an alternative way to block DNS packets or delete the test.
-TEST_F(ResolverMultinetworkTest, DISABLED_DnsWithVpn) {
+// TODO(b/219434602): find an alternative way to block DNS packets on T+.
+TEST_F(ResolverMultinetworkTest, DnsWithVpn) {
+    if (android::modules::sdklevel::IsAtLeastT()) GTEST_SKIP() << "T+ device.";
     SKIP_IF_BPF_NOT_SUPPORTED;
     SKIP_IF_REMOTE_VERSION_LESS_THAN(mDnsClient.resolvService(), 4);
     constexpr char host_name[] = "ohayou.example.com.";
